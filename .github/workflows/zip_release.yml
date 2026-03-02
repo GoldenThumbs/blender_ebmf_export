@@ -1,8 +1,7 @@
 name: Zip Release
 
 on:
-  push:
-    branches: [ "main" ]
+  push
 
 jobs:
    upload_release:
@@ -32,5 +31,6 @@ jobs:
    
     - name: Release
       uses: softprops/action-gh-release@v2
+      if: github.ref_type == 'tag'
       with:
         files: ./releases/io_ebmf_export.zip
