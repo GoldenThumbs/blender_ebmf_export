@@ -1,0 +1,37 @@
+name: Zip Release
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+   upload_release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Git Short Hash
+      id: git_commit_hash
+      run: echo "short-hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Create Tag
+      id: create_tag
+      run: |
+        git tag v${{ steps.git_commit_hash.outputs.short-hash }}
+        git push origin v${{ steps.git_commit_hash.outputs.short-hash }}
+   
+    - name: Create ZIP
+      run: |
+        mkdir -p releases/${{ steps.git_commit_hash.outputs.short-hash }}
+        cd releases
+        7z a -mx9 io_ebmf_export.zip ${{ steps.git_commit_hash.outputs.short-hash }}
+   
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      if: github.ref_type == 'tag'
+      with:
+        files: ./releases/io_ebmf_export.zip
