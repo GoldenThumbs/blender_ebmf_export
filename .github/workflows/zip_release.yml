@@ -2,17 +2,14 @@ name: Zip Release
 
 on:
   push:
-    branches: [ "main" ]
+    tags: "v*"
 
 jobs:
-   create_release:
+   upload_release:
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
-
-    outputs:
-     upload_url: ${{ steps.create_release.outputs.upload_url }}
 
     steps:
     - uses: actions/checkout@v4
@@ -20,44 +17,14 @@ jobs:
     - name: Git Short Hash
       id: git_commit_hash
       run: echo "short-hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-    - name: Create Tag
-      id: create_tag
-      run: |
-        git tag v${{ steps.git_commit_hash.outputs.short-hash }}
-        git push origin v${{ steps.git_commit_hash.outputs.short-hash }}
-    
-    - name: Create a Release
-      id: create_release
-      uses: elgohr/Github-Release-Action@v5
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        title: v${{ steps.git_commit_hash.outputs.short-hash }}
-        tag: v${{ steps.git_commit_hash.outputs.short-hash }}
-
-   upload_releases:
-    needs: [create_release]
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    steps:
-    - uses: actions/checkout@v4
-
+   
     - name: Create ZIP
       run: |
-        mkdir -p releases
+        mkdir -p releases/${{ steps.git_commit_hash.outputs.short-hash }}
         cd releases
-        7z a -mx9 io_ebmf_export.zip
-    
-    - name: Upload Auto-Build
-      uses: actions/upload-release-asset@v1
-      env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        7z a -mx9 io_ebmf_export.zip ${{ steps.git_commit_hash.outputs.short-hash }}
+   
+    - name: Release
+      uses: softprops/action-gh-release@v2
       with:
-        upload_url: ${{ needs.create_release.outputs.upload_url }}
-        asset_path: ./releases/io_ebmf_export.zip
-        asset_name:  io_ebmf_export.zip
-        asset_content_type: application/zip
+        files: ./releases/io_ebmf_export.zip
