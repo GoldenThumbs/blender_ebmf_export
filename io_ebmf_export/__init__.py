@@ -1,7 +1,7 @@
 import bpy
 
 import os
-import sys
+# import sys
 import struct as sct
 
 import math
@@ -10,11 +10,11 @@ import mathutils as MU
 from . import mesh_util as MeshUtil
 
 from bpy_extras.io_utils import ExportHelper
-from bpy.props import StringProperty, BoolProperty, EnumProperty
+from bpy.props import StringProperty
 from bpy.types import Operator
 
 # import importlib.util
-# 
+#
 # def import_from_path(module_name, file_path):
 #     sys.path.append(os.path.dirname(file_path))
 #     spec = importlib.util.spec_from_file_location(module_name, file_path)
@@ -22,7 +22,7 @@ from bpy.types import Operator
 #     sys.modules[module_name] = module
 #     spec.loader.exec_module(module)
 #     return module
-# 
+#
 # MeshUtil = import_from_path("mesh_util", "/home/renny/Dev/dungeon/utility/blender_scripts/io_ebmf_export/mesh_util.py")
 
 class NodeData():
@@ -57,6 +57,7 @@ class ExportEBMF(Operator, ExportHelper):
 
       objs_to_process: list[bpy.types.Object] = []
       mesh_node_pairs: list[tuple[bpy.types.Object, int]] = []
+      empty_slot_materials: list[bpy.types.Material] = []
 
       def CleanupObjects():
          bpy.ops.object.select_all(action='DESELECT')
@@ -65,6 +66,10 @@ class ExportEBMF(Operator, ExportHelper):
             mesh_node_pair[0].select_set(True)
 
          bpy.ops.object.delete(confirm=False)
+
+         for material in empty_slot_materials:
+            material.user_clear()
+            bpy.data.materials.remove(material)
 
       if not obj_active.select_get():
          self.report({'ERROR'}, "The active object must be selected to export")
@@ -80,7 +85,7 @@ class ExportEBMF(Operator, ExportHelper):
 
          if obj.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
-         
+
          objs_to_process.append(obj)
 
       if len(objs_to_process) == 0:
@@ -104,18 +109,18 @@ class ExportEBMF(Operator, ExportHelper):
       node_count: int = 0
       mesh_count: int = 0
       material_count: int = 0
-      
+
       bpy.ops.object.select_all(action='DESELECT')
       for obj in objs_to_process:
          obj.select_set(True)
-         
+
          bpy.ops.object.duplicate()
          new_obj = bpy.context.selected_objects[0]
 
          node: NodeData = NodeData()
          node.origin = obj.location.copy()
          node.scale = new_obj.scale.copy()
-         
+
          if obj.rotation_mode == 'QUATERNION':
             node.rotation = obj.rotation_quaternion.copy()
          elif obj.rotation_mode == 'AXIS_ANGLE':
@@ -141,12 +146,14 @@ class ExportEBMF(Operator, ExportHelper):
          mesh_count += len(material_objs)
          material_count += len(obj.material_slots)
 
-         for material_obj in material_objs:
-            mesh_node_pairs.append((material_obj, node_id))
+         for material_id, material_obj in enumerate(material_objs):
+            material = bpy.data.materials.new("{}_Slot{:d}".format(obj.name, material_id)) if material_obj.active_material is None else material_obj.active_material
+            if material_obj.active_material is None:
+               empty_slot_materials.append(material)
 
-         for material_id, material_slot in enumerate(obj.material_slots):
-            material = material_slot.material
+            material_obj.active_material = material
             materials[material.name] = material_id
+            mesh_node_pairs.append((material_obj, node_id))
 
       file_model_out.write(sct.pack("4s", b"EBMF"))
       file_model_out.write(sct.pack("H", 1))
@@ -162,7 +169,7 @@ class ExportEBMF(Operator, ExportHelper):
 
          for letter in node_name:
             file_model_out.write(sct.pack("c", bytes(letter, "ascii")))
-         
+
          file_model_out.write(sct.pack("c", b'\0'))
 
          file_model_out.write(sct.pack("f", node.origin.x))
