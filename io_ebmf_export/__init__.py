@@ -10,7 +10,7 @@ import mathutils as MU
 from . import mesh_util as MeshUtil
 
 from bpy_extras.io_utils import ExportHelper
-from bpy.props import StringProperty
+from bpy.props import StringProperty, BoolProperty
 from bpy.types import Operator
 
 # import importlib.util
@@ -70,6 +70,18 @@ class ExportEBMF(Operator, ExportHelper):
    material_ids: dict[str, int] = {}
    nodes: dict[str, NodeData] = {}
 
+   export_materials: BoolProperty(name="Export Materials", default=True)
+
+   def draw(self, context):
+      layout = self.layout
+      layout.use_property_split = True
+      layout.use_property_decorate = False  # No animation.
+
+      header, body = layout.panel("EBMF_export_materials", default_closed=False)
+      header.label(text="Materials")
+      if body:
+          body.prop(self, "export_materials")
+
    def CleanupObjects(self):
       bpy.ops.object.select_all(action='DESELECT')
 
@@ -113,7 +125,9 @@ class ExportEBMF(Operator, ExportHelper):
                self.empty_slot_materials.append(material)
 
             self.report({'INFO'}, material.name)
-            self.material_ids[material.name] = len(self.material_ids)
+
+            if material.name not in self.material_ids:
+               self.material_ids[material.name] = len(self.material_ids)
 
          MeshUtil.PrepMesh(new_obj.data, self.transform)
 
@@ -131,12 +145,13 @@ class ExportEBMF(Operator, ExportHelper):
          material_objs = bpy.context.selected_objects
 
          self.mesh_count += len(material_objs)
-         self.material_count += len(obj.material_slots)
 
          for material_obj in material_objs:
             self.mesh_node_pairs.append((material_obj, node_id))
 
          bpy.ops.object.select_all(action='DESELECT')
+
+      self.material_count = len(self.material_ids)
 
    def WriteModel(self, context: bpy.types.Context, filepath: str):
       print("Writing Ector Model...")
@@ -178,7 +193,6 @@ class ExportEBMF(Operator, ExportHelper):
       basedir = os.path.dirname(filepath)
       file_path = os.path.join(basedir, name)
       file_model_out = open(file_path + ".ebmf", "wb")
-      file_material_out = open(file_path + ".mat", "wt")
 
       file_model_out.write(sct.pack("4s", b"EBMF"))
       file_model_out.write(sct.pack("H", 1))
@@ -224,10 +238,13 @@ class ExportEBMF(Operator, ExportHelper):
 
       file_model_out.close()
 
-      for material_id, material_name in enumerate(self.material_ids):
-         file_material_out.write("\n{0}\n{{\n\tid = {1};\n}}\n".format(material_name, material_id))
+      if self.export_materials:
+         file_material_out = open(file_path + ".mat", "wt")
 
-      file_material_out.close()
+         for material_id, material_name in enumerate(self.material_ids):
+            file_material_out.write("\n{0}\n{{\n\tid = {1};\n}}\n".format(material_name, material_id))
+
+         file_material_out.close()
 
       self.CleanupObjects()
 
