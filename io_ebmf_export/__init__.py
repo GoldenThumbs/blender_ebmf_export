@@ -26,6 +26,7 @@ from bpy.types import Operator
 # MeshUtil = import_from_path("mesh_util", "/home/renny/Dev/dungeon/utility/blender_scripts/io_ebmf_export/mesh_util.py")
 
 class NodeData():
+   name: str = ""
    origin: MU.Vector = MU.Vector((0, 0, 0))
    rotation: MU.Quaternion = MU.Quaternion((1, 0, 0, 0))
    scale: MU.Vector = MU.Vector((1, 1, 1))
@@ -35,6 +36,18 @@ class NodeData():
    last_id: int = -1
    next_id: int = -1
    root_child_id: int = -1
+
+   def __init__(self, object: bpy.types.Object):
+      self.name = object.name
+      self.origin = object.location.copy()
+      self.scale = object.scale.copy()
+
+      if object.rotation_mode == 'QUATERNION':
+         self.rotation = object.rotation_quaternion.copy()
+      elif object.rotation_mode == 'AXIS_ANGLE':
+         self.rotation = MU.Quaternion(object.rotation_axis_angle.xyz, object.rotation_axis_angle.w)
+      else:
+         self.rotation = object.rotation_euler.to_quaternion()
 
 class ExportEBMF(Operator, ExportHelper):
    """Exports selected models in Ector Binary Model Format (.ebmf)"""
@@ -47,6 +60,84 @@ class ExportEBMF(Operator, ExportHelper):
 
    transform = MU.Matrix.Rotation(-math.pi * 0.5, 4, 'X')
 
+   node_count: int = 0
+   mesh_count: int = 0
+   material_count: int = 0
+
+   objs_to_process: list[bpy.types.Object] = []
+   mesh_node_pairs: list[tuple[bpy.types.Object, int]] = []
+   empty_slot_materials: list[bpy.types.Material] = []
+   material_ids: dict[str, int] = {}
+   nodes: dict[str, NodeData] = {}
+
+   def CleanupObjects(self):
+      bpy.ops.object.select_all(action='DESELECT')
+
+      for mesh_node_pair in self.mesh_node_pairs:
+         mesh_node_pair[0].select_set(True)
+
+      bpy.ops.object.delete(confirm=False)
+
+      for material in self.empty_slot_materials:
+         material.user_clear()
+         bpy.data.materials.remove(material)
+
+      self.node_count = 0
+      self.mesh_count = 0
+      self.material_count = 0
+
+      self.objs_to_process.clear()
+      self.mesh_node_pairs.clear()
+      self.empty_slot_materials.clear()
+      self.material_ids.clear()
+      self.nodes.clear()
+
+   def ProcessObjects(self):
+      bpy.ops.object.select_all(action='DESELECT')
+
+      for obj in self.objs_to_process:
+         obj.select_set(True)
+
+         bpy.ops.object.duplicate()
+         new_obj = bpy.context.selected_objects[0]
+         bpy.context.view_layer.objects.active = new_obj
+
+         obj.select_set(False)
+
+         for material_id, material_slot in enumerate(new_obj.material_slots):
+            material = material_slot.material
+            if material is None:
+               material = bpy.data.materials.new("{}_Slot{:d}".format(obj.name, material_id))
+               material_slot.material = material
+
+               self.empty_slot_materials.append(material)
+
+            self.report({'INFO'}, material.name)
+            self.material_ids[material.name] = len(self.material_ids)
+
+         MeshUtil.PrepMesh(new_obj.data, self.transform)
+
+         node: NodeData = NodeData(obj)
+
+         self.node_count += 1
+         self.nodes[node.name] = node
+         node_id = list(self.nodes).index(obj.name)
+
+         bpy.ops.object.editmode_toggle()
+         bpy.ops.mesh.select_all(action='DESELECT')
+         bpy.ops.mesh.separate(type='MATERIAL')
+         bpy.ops.object.editmode_toggle()
+
+         material_objs = bpy.context.selected_objects
+
+         self.mesh_count += len(material_objs)
+         self.material_count += len(obj.material_slots)
+
+         for material_obj in material_objs:
+            self.mesh_node_pairs.append((material_obj, node_id))
+
+         bpy.ops.object.select_all(action='DESELECT')
+
    def WriteModel(self, context: bpy.types.Context, filepath: str):
       print("Writing Ector Model...")
 
@@ -54,22 +145,6 @@ class ExportEBMF(Operator, ExportHelper):
 
       obj_active = view_layer.objects.active
       selection = context.selected_objects
-
-      objs_to_process: list[bpy.types.Object] = []
-      mesh_node_pairs: list[tuple[bpy.types.Object, int]] = []
-      empty_slot_materials: list[bpy.types.Material] = []
-
-      def CleanupObjects():
-         bpy.ops.object.select_all(action='DESELECT')
-
-         for mesh_node_pair in mesh_node_pairs:
-            mesh_node_pair[0].select_set(True)
-
-         bpy.ops.object.delete(confirm=False)
-
-         for material in empty_slot_materials:
-            material.user_clear()
-            bpy.data.materials.remove(material)
 
       if not obj_active.select_get():
          self.report({'ERROR'}, "The active object must be selected to export")
@@ -86,16 +161,18 @@ class ExportEBMF(Operator, ExportHelper):
          if obj.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-         objs_to_process.append(obj)
+         self.objs_to_process.append(obj)
 
-      if len(objs_to_process) == 0:
+      if len(self.objs_to_process) == 0:
          self.report({'ERROR'}, "None of the selected objects were a mesh")
          return {'CANCELLED'}
 
       if obj_active.type != 'MESH':
-         obj_active = objs_to_process[0]
+         obj_active = self.objs_to_process[0]
 
       view_layer.objects.active = obj_active
+
+      self.ProcessObjects()
 
       name = os.path.splitext(os.path.basename(filepath))[0]
       basedir = os.path.dirname(filepath)
@@ -103,71 +180,16 @@ class ExportEBMF(Operator, ExportHelper):
       file_model_out = open(file_path + ".ebmf", "wb")
       file_material_out = open(file_path + ".mat", "wt")
 
-      nodes: dict[str, NodeData] = {}
-      materials: dict[str, int] = {}
-
-      node_count: int = 0
-      mesh_count: int = 0
-      material_count: int = 0
-
-      bpy.ops.object.select_all(action='DESELECT')
-      for obj in objs_to_process:
-         obj.select_set(True)
-
-         bpy.ops.object.duplicate()
-         new_obj = bpy.context.selected_objects[0]
-
-         node: NodeData = NodeData()
-         node.origin = obj.location.copy()
-         node.scale = new_obj.scale.copy()
-
-         if obj.rotation_mode == 'QUATERNION':
-            node.rotation = obj.rotation_quaternion.copy()
-         elif obj.rotation_mode == 'AXIS_ANGLE':
-            node.rotation = MU.Quaternion(obj.rotation_axis_angle.xyz, obj.rotation_axis_angle.w)
-         else:
-            node.rotation = obj.rotation_euler.to_quaternion()
-
-         nodes[obj.name] = node
-         node_id = list(nodes).index(obj.name)
-
-         node_count += 1
-
-         MeshUtil.PrepMesh(new_obj.data, self.transform)
-
-         bpy.ops.object.editmode_toggle()
-         bpy.ops.mesh.select_all(action='DESELECT')
-         bpy.ops.mesh.separate(type='MATERIAL')
-         bpy.ops.object.editmode_toggle()
-
-         material_objs = bpy.context.selected_objects
-         bpy.ops.object.select_all(action='DESELECT')
-
-         mesh_count += len(material_objs)
-         material_count += len(obj.material_slots)
-
-         for material_id, material_obj in enumerate(material_objs):
-            material = bpy.data.materials.new("{}_Slot{:d}".format(obj.name, material_id)) if material_obj.active_material is None else material_obj.active_material
-            if material_obj.active_material is None:
-               empty_slot_materials.append(material)
-
-            material_obj.active_material = material
-            materials[material.name] = material_id
-            mesh_node_pairs.append((material_obj, node_id))
-
       file_model_out.write(sct.pack("4s", b"EBMF"))
       file_model_out.write(sct.pack("H", 1))
       file_model_out.write(sct.pack("h", -1))
-      file_model_out.write(sct.pack("I", node_count))
-      file_model_out.write(sct.pack("I", mesh_count))
-      file_model_out.write(sct.pack("I", material_count))
+      file_model_out.write(sct.pack("I", self.node_count))
+      file_model_out.write(sct.pack("I", self.mesh_count))
+      file_model_out.write(sct.pack("I", self.material_count))
 
-      for mesh_node_pair in mesh_node_pairs:
-         node_id: int = mesh_node_pair[1]
-         node_name: str = list(nodes.keys())[node_id]
-         node: NodeData = nodes[node_name]
+      for node in self.nodes.values():
 
-         for letter in node_name:
+         for letter in node.name:
             file_model_out.write(sct.pack("c", bytes(letter, "ascii")))
 
          file_model_out.write(sct.pack("c", b'\0'))
@@ -191,22 +213,23 @@ class ExportEBMF(Operator, ExportHelper):
          file_model_out.write(sct.pack("h", node.next_id))
          file_model_out.write(sct.pack("h", node.root_child_id))
 
-      for mesh_node_pair in mesh_node_pairs:
+      for mesh_node_pair in self.mesh_node_pairs:
          obj = mesh_node_pair[0]
          node_id = mesh_node_pair[1]
 
          has_material = len(obj.material_slots) != 0
-         material_id = materials[obj.active_material.name] if has_material else 0
+         material_id = self.material_ids[obj.material_slots[0].material.name] if has_material else 0
+         self.report({'INFO'}, "{} has material {} with id {:d}".format(obj.name, obj.material_slots[0].material.name, material_id))
          MeshUtil.WriteEctorMeshToFile(file_model_out, obj, node_id, material_id)
 
       file_model_out.close()
 
-      for material_id, material_name in enumerate(materials):
-         file_material_out.write("\n{0}\n{{\n\tid {1};\n}}\n".format(material_name, material_id))
+      for material_id, material_name in enumerate(self.material_ids):
+         file_material_out.write("\n{0}\n{{\n\tid = {1};\n}}\n".format(material_name, material_id))
 
       file_material_out.close()
 
-      CleanupObjects()
+      self.CleanupObjects()
 
       view_layer.objects.active = obj_active
 
