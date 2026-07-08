@@ -58,6 +58,9 @@ class ExportEBMF(Operator, ExportHelper):
 
    filter_glob = StringProperty(default="*.ebmf", options={'HIDDEN'})
 
+   export_materials: BoolProperty(default=True)
+   export_path: StringProperty()
+
    transform = MU.Matrix.Rotation(-math.pi * 0.5, 4, 'X')
 
    node_count: int = 0
@@ -67,10 +70,8 @@ class ExportEBMF(Operator, ExportHelper):
    objs_to_process: list[bpy.types.Object] = []
    mesh_node_pairs: list[tuple[bpy.types.Object, int]] = []
    empty_slot_materials: list[bpy.types.Material] = []
-   material_ids: dict[str, int] = {}
+   materials: dict[str, tuple[int, bpy.types.Material]] = {}
    nodes: dict[str, NodeData] = {}
-
-   export_materials: BoolProperty(name="Export Materials", default=True)
 
    def draw(self, context):
       layout = self.layout
@@ -80,7 +81,8 @@ class ExportEBMF(Operator, ExportHelper):
       header, body = layout.panel("EBMF_export_materials", default_closed=False)
       header.label(text="Materials")
       if body:
-          body.prop(self, "export_materials")
+          body.prop(self, 'export_materials', text="Export Materials")
+          body.prop(self, 'export_path', text="Root Folder")
 
    def CleanupObjects(self):
       bpy.ops.object.select_all(action='DESELECT')
@@ -101,7 +103,7 @@ class ExportEBMF(Operator, ExportHelper):
       self.objs_to_process.clear()
       self.mesh_node_pairs.clear()
       self.empty_slot_materials.clear()
-      self.material_ids.clear()
+      self.materials.clear()
       self.nodes.clear()
 
    def ProcessObjects(self):
@@ -126,8 +128,8 @@ class ExportEBMF(Operator, ExportHelper):
 
             self.report({'INFO'}, material.name)
 
-            if material.name not in self.material_ids:
-               self.material_ids[material.name] = len(self.material_ids)
+            if material.name not in self.materials:
+               self.materials[material.name] = (len(self.materials), material)
 
          MeshUtil.PrepMesh(new_obj.data, self.transform)
 
@@ -151,7 +153,50 @@ class ExportEBMF(Operator, ExportHelper):
 
          bpy.ops.object.select_all(action='DESELECT')
 
-      self.material_count = len(self.material_ids)
+      self.material_count = len(self.materials)
+
+   def ExportMaterials(self, file_path: str):
+      if self.export_materials:
+         file_material_out = open(file_path + ".mat", "wt")
+
+         addon_preferences = bpy.context.preferences.addons[__package__].preferences
+         export_path = bpy.path.abspath(self.export_path)
+         if len(export_path) == 0:
+            export_path = bpy.path.abspath(addon_preferences.ebmf_base_path)
+
+         for material_name in self.materials.keys():
+            material_info = self.materials[material_name]
+            material_id = material_info[0]
+            material = material_info[1]
+
+            file_material_out.write("\n{}\n{{\n\tid = {};\n".format(material_name, material_id))
+
+            tex_slot = 0
+
+            for node in material.node_tree.nodes:
+
+               if node.label == "Surf" and node.bl_idname == "ShaderNodeBsdfDiffuse":
+                  file_material_out.write("\tsurf = {};\n".format(node.name))
+
+               if node.label == "Tex" and node.bl_idname == "ShaderNodeTexImage":
+                  image: bpy.types.Image = node.image
+                  if image is None:
+                     continue
+
+                  path = bpy.path.abspath(image.filepath_raw)
+                  path = os.path.relpath(path, export_path)
+
+                  if len(path) != 0:
+                     file_material_out.write("\ttex = {}, {};\n".format(tex_slot, path))
+                     tex_slot += 1
+
+               if node.label == "Param" and node.bl_idname == "ShaderNodeValue":
+                  file_material_out.write("\tparam = {}, f, {:.5g};\n".format(node.name, node.outputs[0].default_value))
+
+            file_material_out.write("}\n")
+
+
+         file_material_out.close()
 
    def WriteModel(self, context: bpy.types.Context, filepath: str):
       print("Writing Ector Model...")
@@ -232,20 +277,11 @@ class ExportEBMF(Operator, ExportHelper):
          node_id = mesh_node_pair[1]
 
          has_material = len(obj.material_slots) != 0
-         material_id = self.material_ids[obj.material_slots[0].material.name] if has_material else 0
-         self.report({'INFO'}, "{} has material {} with id {:d}".format(obj.name, obj.material_slots[0].material.name, material_id))
+         material_id = self.materials[obj.material_slots[0].material.name][0] if has_material else -1
          MeshUtil.WriteEctorMeshToFile(file_model_out, obj, node_id, material_id)
 
       file_model_out.close()
-
-      if self.export_materials:
-         file_material_out = open(file_path + ".mat", "wt")
-
-         for material_id, material_name in enumerate(self.material_ids):
-            file_material_out.write("\n{0}\n{{\n\tid = {1};\n}}\n".format(material_name, material_id))
-
-         file_material_out.close()
-
+      self.ExportMaterials(file_path)
       self.CleanupObjects()
 
       view_layer.objects.active = obj_active
@@ -260,6 +296,15 @@ class ExportEBMF(Operator, ExportHelper):
    def execute(self, context):
       return self.WriteModel(context, self.filepath)
 
+class ExportEBMFPrefs(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    ebmf_base_path: StringProperty()
+
+    def draw(self, context):
+       layout = self.layout
+       row = layout.row()
+       row.prop(self, "ebmf_base_path", text="Ector Base Path")
 
 # Only needed if you want to add into a dynamic menu
 def menu_func_export(self, context):
@@ -267,13 +312,13 @@ def menu_func_export(self, context):
 
 def register():
    bpy.utils.register_class(ExportEBMF)
+   bpy.utils.register_class(ExportEBMFPrefs)
    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
-
 
 def unregister():
    bpy.utils.unregister_class(ExportEBMF)
+   bpy.utils.unregister_class(ExportEBMFPrefs)
    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-
 
 if __name__ == "__main__":
    register()
