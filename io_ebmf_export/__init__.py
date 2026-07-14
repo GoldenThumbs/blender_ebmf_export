@@ -4,6 +4,8 @@ import os
 # import sys
 import struct as sct
 
+from io import BufferedWriter
+
 import math
 import mathutils as MU
 
@@ -49,6 +51,41 @@ class NodeData():
       else:
          self.rotation = object.rotation_euler.to_quaternion()
 
+class Color():
+   red: float = 0.0
+   green: float = 0.0
+   blue: float = 0.0
+   alpha: float = 1.0
+
+   def __init__(self, color: list[float] = []):
+      length = len(color)
+
+      if length >= 1:
+         self.red = color[0]
+
+      if length >= 2:
+         self.green = color[1]
+
+      if length >= 3:
+         self.blue = color[2]
+
+      if length >= 4:
+         self.alpha = color[3]
+
+   def Pow(self, power: float):
+      self.red = math.pow(self.red, power)
+      self.green = math.pow(self.green, power)
+      self.blue = math.pow(self.blue, power)
+
+   @property
+   def ByteColor(self) -> tuple[int, int, int, int]:
+      r = math.floor(self.red * 255)
+      g = math.floor(self.green * 255)
+      b = math.floor(self.blue * 255)
+      a = math.floor(self.alpha * 255)
+
+      return (r, g, b, a)
+
 class ExportEBMF(Operator, ExportHelper):
    """Exports selected models in Ector Binary Model Format (.ebmf)"""
    bl_idname = "export_scene.ebmf"
@@ -60,8 +97,25 @@ class ExportEBMF(Operator, ExportHelper):
 
    export_materials: BoolProperty(default=True)
    export_path: StringProperty()
+   export_gamma_correct_colors: BoolProperty(default=False)
 
    transform = MU.Matrix.Rotation(-math.pi * 0.5, 4, 'X')
+
+   _gamma = 2.2
+   _inv_gamma = 1.0 / _gamma
+
+   @property
+   def gamma(self) -> float:
+      return self._gamma
+
+   @gamma.setter
+   def gamma(self, value: float):
+      self._gamma = value
+      self._inv_gamma = 1.0 / value
+
+   @property
+   def inv_gamma(self) -> float:
+      return self._inv_gamma
 
    node_count: int = 0
    mesh_count: int = 0
@@ -83,6 +137,7 @@ class ExportEBMF(Operator, ExportHelper):
       if body:
           body.prop(self, 'export_materials', text="Export Materials")
           body.prop(self, 'export_path', text="Root Folder")
+          body.prop(self, 'export_gamma_correct_colors', text="Gamma Correct Colors")
 
    def CleanupObjects(self):
       bpy.ops.object.select_all(action='DESELECT')
@@ -155,6 +210,66 @@ class ExportEBMF(Operator, ExportHelper):
 
       self.material_count = len(self.materials)
 
+   def WriteParam(self, node: bpy.types.ShaderNode, file_material_out: BufferedWriter):
+      def WriteValue(as_ints: bool = False):
+         if node.bl_idname == "ShaderNodeValue":
+            if as_ints:
+               file_material_out.write("\tparam = {}, i, {:d};\n".format(node.name, math.floor(node.outputs[0].default_value)))
+
+            else:
+               file_material_out.write("\tparam = {}, f, {:.5g};\n".format(node.name, node.outputs[0].default_value))
+
+      def WriteColor(as_ints: bool = False):
+         if node.bl_idname == "ShaderNodeRGB":
+            color: Color = Color(node.outputs[0].default_value)
+
+            if self.export_gamma_correct_colors:
+               color.Pow(self.inv_gamma)
+
+            if as_ints:
+               rgba = color.ByteColor
+               file_material_out.write("\tparam = {}, i, {:d}, {:d}, {:d}, {:d};\n".format(node.name, rgba[0], rgba[1], rgba[2], rgba[3]))
+
+            else:
+               rgba = color.ByteColor
+               file_material_out.write("\tparam = {}, f, {:.5g}, {:.5g}, {:.5g}, {:.5g};\n".format(node.name, color.red, color.green, color.blue, color.alpha))
+
+
+      if node.label == "Param":
+         WriteValue()
+         WriteColor()
+
+      if node.label == "ParamI":
+         WriteValue(True)
+         WriteColor(True)
+
+   def WriteTex(self, export_path: str , tex_count: int, node: bpy.types.ShaderNode, file_material_out: BufferedWriter) -> int:
+
+      def IsInt(string: str) -> bool:
+         try:
+            int(string)
+            return True
+         except ValueError:
+            return False
+
+      if node.bl_idname == "ShaderNodeTexImage" and node.label.startswith("Tex", 0, 3):
+         image: bpy.types.Image = node.image
+         if image is None:
+            return
+
+         path = bpy.path.abspath(image.filepath_raw)
+         path = os.path.relpath(path, export_path)
+
+         slot_string: str = node.label.removeprefix("Tex")
+         if len(path) != 0:
+            has_slot = (len(slot_string) != 0 and IsInt(slot_string))
+            tex_slot = int(slot_string) if has_slot else tex_count
+
+            file_material_out.write("\ttex = {}, {};\n".format(tex_slot, path))
+            tex_count += 1
+
+      return tex_count
+
    def ExportMaterials(self, file_path: str):
       if self.export_materials:
          file_material_out = open(file_path + ".mat", "wt")
@@ -171,27 +286,14 @@ class ExportEBMF(Operator, ExportHelper):
 
             file_material_out.write("\n{}\n{{\n\tid = {};\n".format(material_name, material_id))
 
-            tex_slot = 0
-
+            tex_count = 0
             for node in material.node_tree.nodes:
 
-               if node.label == "Surf" and node.bl_idname == "ShaderNodeBsdfDiffuse":
+               if node.label == "Surf":
                   file_material_out.write("\tsurf = {};\n".format(node.name))
 
-               if node.label == "Tex" and node.bl_idname == "ShaderNodeTexImage":
-                  image: bpy.types.Image = node.image
-                  if image is None:
-                     continue
-
-                  path = bpy.path.abspath(image.filepath_raw)
-                  path = os.path.relpath(path, export_path)
-
-                  if len(path) != 0:
-                     file_material_out.write("\ttex = {}, {};\n".format(tex_slot, path))
-                     tex_slot += 1
-
-               if node.label == "Param" and node.bl_idname == "ShaderNodeValue":
-                  file_material_out.write("\tparam = {}, f, {:.5g};\n".format(node.name, node.outputs[0].default_value))
+               self.WriteParam(node, file_material_out)
+               tex_count = self.WriteTex(export_path, tex_count, node, file_material_out)
 
             file_material_out.write("}\n")
 
