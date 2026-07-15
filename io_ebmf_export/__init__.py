@@ -181,8 +181,6 @@ class ExportEBMF(Operator, ExportHelper):
 
                self.empty_slot_materials.append(material)
 
-            self.report({'INFO'}, material.name)
-
             if material.name not in self.materials:
                self.materials[material.name] = (len(self.materials), material)
 
@@ -199,9 +197,21 @@ class ExportEBMF(Operator, ExportHelper):
          bpy.ops.mesh.separate(type='MATERIAL')
          bpy.ops.object.editmode_toggle()
 
-         material_objs = bpy.context.selected_objects
+         material_objs: list[bpy.types.Object] = bpy.context.selected_objects
 
          self.mesh_count += len(material_objs)
+
+         material_obj_string = obj.name + ".Material"
+         def sort_func(element):
+            string = element.name.removeprefix(material_obj_string)
+            return int(string)
+
+         for material_obj in material_objs:
+            material = material_obj.material_slots[0].material
+            material_id = self.materials[material.name][0]
+            material_obj.name = material_obj_string + str(material_id)
+
+         material_objs.sort(key=sort_func)
 
          for material_obj in material_objs:
             self.mesh_node_pairs.append((material_obj, node_id))
