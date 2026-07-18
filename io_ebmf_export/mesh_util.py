@@ -61,8 +61,8 @@ def SplitUVIslands(mesh: bpy.types.Mesh, uv_count: int = -1):
    mesh.uv_layers[previous_active_uv].active = True
    # mesh.split_faces()
 
-def ProcessTriangles(tri_count: int, mesh: bpy.types.Mesh):
-   indices = np.empty(tri_count * 3, dtype=np.uint16)
+def ProcessTriangles(tri_count: int, mesh: bpy.types.Mesh, dtype: np.dtype = np.uint16):
+   indices = np.empty(tri_count * 3, dtype=dtype)
 
    for face_i, loop_tri in enumerate(mesh.loop_triangles):
       for i in range(3):
@@ -190,7 +190,9 @@ def WriteEctorMeshToFile(file_out: BufferedWriter, obj: bpy.types.Object, node_i
 
    attribute_count = 2 + uv_count
 
-   indices = ProcessTriangles(tri_count, mesh)
+   high_precision_idx = (vertex_count > (1 << 16) - 1)
+
+   indices = ProcessTriangles(tri_count, mesh, np.uint32 if high_precision_idx else np.uint16)
    vertices, normals = ProcessVertices(vertex_count, mesh)
    texcoords = ProcessUVs(vertex_count, mesh, uv_count)
    tangents = ProcessTangents(vertex_count, mesh, uv_count)
@@ -207,7 +209,7 @@ def WriteEctorMeshToFile(file_out: BufferedWriter, obj: bpy.types.Object, node_i
    WriteAttributes(file_out, extra_attributes)
 
    for index in indices:
-      file_out.write(sct.pack("H", index))
+      file_out.write(sct.pack("I" if high_precision_idx else "H", index))
 
    for vertex in vertices:
       file_out.write(sct.pack("f", vertex))

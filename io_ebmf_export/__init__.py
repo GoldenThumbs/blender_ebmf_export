@@ -41,15 +41,7 @@ class NodeData():
 
    def __init__(self, object: bpy.types.Object):
       self.name = object.name
-      self.origin = object.location.copy()
-      self.scale = object.scale.copy()
-
-      if object.rotation_mode == 'QUATERNION':
-         self.rotation = object.rotation_quaternion.copy()
-      elif object.rotation_mode == 'AXIS_ANGLE':
-         self.rotation = MU.Quaternion(object.rotation_axis_angle.xyz, object.rotation_axis_angle.w)
-      else:
-         self.rotation = object.rotation_euler.to_quaternion()
+      self.origin, self.rotation, self.scale = object.matrix_local.decompose()
 
 class Color():
    red: float = 0.0
@@ -86,6 +78,12 @@ class Color():
 
       return (r, g, b, a)
 
+def DictIndex(dictionary: dict, string: str) -> int:
+   return list(dictionary).index(string)
+
+def ValueByIndex(dictionary: dict, index: int):
+   return dictionary[list(dictionary)[index]]
+
 class ExportEBMF(Operator, ExportHelper):
    """Exports selected models in Ector Binary Model Format (.ebmf)"""
    bl_idname = "export_scene.ebmf"
@@ -117,10 +115,6 @@ class ExportEBMF(Operator, ExportHelper):
    def inv_gamma(self) -> float:
       return self._inv_gamma
 
-   node_count: int = 0
-   mesh_count: int = 0
-   material_count: int = 0
-
    objs_to_process: list[bpy.types.Object] = []
    mesh_node_pairs: list[tuple[bpy.types.Object, int]] = []
    empty_slot_materials: list[bpy.types.Material] = []
@@ -151,10 +145,6 @@ class ExportEBMF(Operator, ExportHelper):
          material.user_clear()
          bpy.data.materials.remove(material)
 
-      self.node_count = 0
-      self.mesh_count = 0
-      self.material_count = 0
-
       self.objs_to_process.clear()
       self.mesh_node_pairs.clear()
       self.empty_slot_materials.clear()
@@ -172,6 +162,10 @@ class ExportEBMF(Operator, ExportHelper):
          bpy.context.view_layer.objects.active = new_obj
 
          obj.select_set(False)
+         new_obj.select_set(True)
+
+         if len(new_obj.material_slots) == 0:
+            bpy.ops.object.material_slot_add()
 
          for material_id, material_slot in enumerate(new_obj.material_slots):
             material = material_slot.material
@@ -188,9 +182,8 @@ class ExportEBMF(Operator, ExportHelper):
 
          node: NodeData = NodeData(obj)
 
-         self.node_count += 1
          self.nodes[node.name] = node
-         node_id = list(self.nodes).index(obj.name)
+         node_id = DictIndex(self.nodes, obj.name)
 
          bpy.ops.object.editmode_toggle()
          bpy.ops.mesh.select_all(action='DESELECT')
@@ -198,8 +191,6 @@ class ExportEBMF(Operator, ExportHelper):
          bpy.ops.object.editmode_toggle()
 
          material_objs: list[bpy.types.Object] = bpy.context.selected_objects
-
-         self.mesh_count += len(material_objs)
 
          material_obj_string = obj.name + ".Material"
          def sort_func(element):
@@ -218,7 +209,31 @@ class ExportEBMF(Operator, ExportHelper):
 
          bpy.ops.object.select_all(action='DESELECT')
 
-      self.material_count = len(self.materials)
+      bpy.ops.object.select_all(action='DESELECT')
+
+      for obj in self.objs_to_process:
+         node = self.nodes[obj.name]
+
+         if obj.parent is not None:
+            parent_node: NodeData
+
+            if obj.parent.name in self.nodes:
+               parent_node = self.nodes[obj.parent.name]
+
+            else:
+               self.nodes[obj.parent.name] = NodeData(obj.parent)
+               parent_node = self.nodes[obj.parent.name]
+
+            parent_node.child_count += 1
+
+            node.parent_id = DictIndex(self.nodes, parent_node.name)
+            node.next_id = parent_node.root_child_id
+            parent_node.root_child_id = DictIndex(self.nodes, node.name)
+
+            if node.next_id > -1:
+               next_node = ValueByIndex(self.nodes, node.next_id)
+               next_node.last_id = parent_node.root_child_id
+
 
    def WriteParam(self, node: bpy.types.ShaderNode, file_material_out: BufferedWriter):
       def WriteValue(as_ints: bool = False):
@@ -354,11 +369,23 @@ class ExportEBMF(Operator, ExportHelper):
       file_model_out.write(sct.pack("4s", b"EBMF"))
       file_model_out.write(sct.pack("H", 1))
       file_model_out.write(sct.pack("h", -1))
-      file_model_out.write(sct.pack("I", self.node_count))
-      file_model_out.write(sct.pack("I", self.mesh_count))
-      file_model_out.write(sct.pack("I", self.material_count))
+      file_model_out.write(sct.pack("I", len(self.nodes)))
+      file_model_out.write(sct.pack("I", len(self.mesh_node_pairs)))
+      file_model_out.write(sct.pack("I", len(self.materials)))
 
       for node in self.nodes.values():
+         self.report({'INFO'}, "node: " + node.name)
+
+         if node.parent_id > -1:
+            parent_node = ValueByIndex(self.nodes, node.parent_id)
+            self.report({'INFO'}, "<- parent: " + parent_node.name)
+
+         child_root_id = node.root_child_id
+         while child_root_id > -1:
+            child_node = ValueByIndex(self.nodes, child_root_id)
+            self.report({'INFO'}, "--> child: " + child_node.name)
+
+            child_root_id = child_node.next_id
 
          for letter in node.name:
             file_model_out.write(sct.pack("c", bytes(letter, "ascii")))
